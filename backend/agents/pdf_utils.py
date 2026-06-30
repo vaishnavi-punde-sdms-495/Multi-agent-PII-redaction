@@ -1,11 +1,4 @@
-"""
-PDF support: rasterize each page to an image (so the existing per-image
-detection/validation/redaction pipeline can run unchanged on each page),
-then reassemble the redacted page images back into a single PDF.
-
-Uses PyMuPDF (fitz) — pure Python wheel, no system poppler dependency,
-which keeps the "runs locally without extra OS packages" property intact.
-"""
+#pdf_utils.py
 import os
 import logging
 import fitz  # PyMuPDF

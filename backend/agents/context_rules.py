@@ -26,6 +26,9 @@ class ContextRules:
     def is_valid_aadhaar(text):
         """Validate Aadhaar number (12 digits)."""
         digits = re.sub(r'\s', '', text)
+        # Strip a leading '+' if it survived the whitespace-only strip above
+        # (e.g. "+919175238190" -> "919175238190")
+        digits = digits.lstrip('+')
         if len(digits) != 12 or not digits.isdigit():
             return False
         # Check for common fake patterns
@@ -33,6 +36,15 @@ class ContextRules:
                       '333333333333', '444444444444', '555555555555',
                       '666666666666', '777777777777', '888888888888', 
                       '999999999999', '123456789012']:
+            return False
+        # Disambiguate from an Indian mobile number written with its country
+        # code and no separator (e.g. "+91 9175238190" -> raw digits
+        # "919175238190", which is also a syntactically valid 12-digit
+        # string). Aadhaar numbers are never printed with a country-code
+        # prefix, so "91" + a valid 10-digit mobile shape (starts 6-9) is
+        # almost certainly a phone number, not an Aadhaar — reject it here
+        # so it doesn't get double-detected as both.
+        if digits.startswith('91') and digits[2] in '6789':
             return False
         return True
     
@@ -50,8 +62,18 @@ class ContextRules:
     
     @staticmethod
     def is_valid_phone(text):
-        """Validate Indian phone number (10 digits, starts with 6-9)."""
+        """Validate Indian phone number (10 digits, starts with 6-9).
+        Normalizes common prefixes (+91 / 91 / 0) before checking length,
+        otherwise valid numbers written with a country code get rejected."""
         digits = re.sub(r'\D', '', text)
+
+        if len(digits) == 12 and digits.startswith('91'):
+            digits = digits[2:]
+        elif len(digits) == 13 and digits.startswith('091'):
+            digits = digits[3:]
+        elif len(digits) == 11 and digits.startswith('0'):
+            digits = digits[1:]
+
         if len(digits) != 10 or not digits.isdigit():
             return False
         if digits[0] not in '6789':
@@ -179,7 +201,20 @@ class ContextRules:
             'excel', 'powerpoint', 'photoshop', 'figma', 'canva',
             'visa', 'mastercard', 'amex', 'paypal', 'google', 'apple',
             'microsoft', 'amazon', 'meta', 'twitter', 'facebook', 'instagram',
-            'whatsapp', 'telegram', 'signal', 'wechat', 'line'
+            'whatsapp', 'telegram', 'signal', 'wechat', 'line',
+            # Common resume/document section headers and field labels —
+            # frequently mislabeled as "name" by vision detection on resumes/forms
+            'education', 'experience', 'skills', 'projects', 'summary',
+            'objective', 'profile', 'contact', 'references', 'certifications',
+            'languages', 'achievements', 'awards', 'publications', 'interests',
+            'hobbies', 'declaration', 'signature', 'address', 'curriculum vitae',
+            'resume', 'personal details', 'work experience', 'professional summary',
+            'career objective', 'technical skills', 'soft skills', 'key skills',
+            'employment history', 'academic background', 'extracurricular',
+            'volunteer experience', 'internship', 'internships', 'training',
+            'workshops', 'leadership', 'strengths', 'father name', "father's name",
+            'mother name', "mother's name", 'date of birth', 'gender', 'nationality',
+            'marital status', 'blood group', 'department', 'designation', 'company'
         }
         text_lower = text.lower().strip()
         if text_lower in false_positives:
@@ -191,6 +226,71 @@ class ContextRules:
         # Check for common fake names
         fake_names = ['test', 'demo', 'sample', 'user', 'admin', 'guest']
         if text_lower in fake_names:
+            return True
+        # Structural checks: a real person's name is short (typically 2-4 words),
+        # has no digits/punctuation, and isn't a long descriptive phrase.
+        if any(ch.isdigit() for ch in text):
+            return True
+        word_count = len(text.split())
+        if word_count == 0 or word_count > 4:
+            return True
+        if any(p in text for p in (':', '@', '/', '|', '-', '_', '(', ')')):
+            return True
+        # Single-word "names" are almost always section headers/labels in
+        # document context (real names on IDs/resumes are virtually always
+        # first+last, i.e. 2+ words)
+        if word_count == 1:
+            return True
+
+        # Heuristics above only catch malformed shapes (punctuation, length) —
+        # they let through plausible-looking-but-wrong phrases like "Active
+        # Bankruptcy" or "None Tax ID" that happen to be capitalized 2-3 word
+        # strings. Use the spaCy NER model (already loaded for Presidio
+        # elsewhere in this project) as a secondary signal — but only to
+        # reject when it confidently tags the text as something OTHER than a
+        # person (org, location, law, event, etc). Do NOT require a positive
+        # PERSON tag to accept: spaCy's NER relies on sentence context, and a
+        # bare isolated 2-3 word string (no surrounding sentence) very often
+        # gets no entity tag at all even for genuine real names — requiring
+        # PERSON confirmation here was rejecting valid names.
+        NON_PERSON_LABELS = {'ORG', 'GPE', 'LOC', 'LAW', 'EVENT', 'FAC',
+                              'PRODUCT', 'WORK_OF_ART', 'NORP', 'MONEY',
+                              'PERCENT', 'DATE', 'TIME', 'CARDINAL', 'ORDINAL'}
+        try:
+            from agents.presidio_fast import get_presidio
+            presidio = get_presidio()
+            if presidio.nlp:
+                doc = presidio.nlp(text)
+                if any(ent.label_ in NON_PERSON_LABELS for ent in doc.ents):
+                    return True
+        except Exception as e:
+            logger.warning(f"spaCy entity check unavailable, falling back to heuristics only: {e}")
+
+        # Content check: real human names never contain common English
+        # stopwords or document/legal/financial vocabulary. Scout sometimes
+        # pattern-matches on "capitalized phrase" rather than "is this a
+        # person" (e.g. "Active Bankruptcy", "Unauthorized Access") — these
+        # pass the structural checks above but fail here.
+        non_name_words = {
+            'a', 'an', 'the', 'or', 'and', 'is', 'are', 'was', 'were', 'be',
+            'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'as', 'this',
+            'that', 'none', 'prior', 'active', 'inactive', 'status', 'tax',
+            'id', 'ein', 'ssn', 'individual', 'filer', 'joint', 'addresses',
+            'address', 'account', 'accounts', 'balance', 'total', 'amount',
+            'date', 'dates', 'number', 'numbers', 'code', 'section', 'page',
+            'document', 'report', 'statement', 'unauthorized', 'access',
+            'distribution', 'strictly', 'prohibited', 'confidential',
+            'bankruptcy', 'filing', 'filed', 'court', 'case', 'docket',
+            'reference', 'summary', 'details', 'information', 'history',
+            'record', 'records', 'type', 'category', 'description', 'notes',
+            'comments', 'remarks', 'pending', 'approved', 'rejected',
+            'verified', 'unverified', 'expired', 'valid', 'invalid',
+            'current', 'previous', 'next', 'first', 'last', 'middle',
+            'name', 'names', 'title', 'titled', 'subject', 'regarding',
+            'pursuant', 'hereby', 'herein', 'thereof', 'whereas'
+        }
+        words_lower = [re.sub(r'[^a-z]', '', w.lower()) for w in text.split()]
+        if any(w in non_name_words for w in words_lower if w):
             return True
         return False
     

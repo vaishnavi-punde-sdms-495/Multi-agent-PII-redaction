@@ -1,4 +1,5 @@
-def polygon_to_xyxy(polygon, img_w, img_h, padding=4):
+#image_utils
+# def polygon_to_xyxy(polygon, img_w, img_h, padding=4):
     """Convert polygon points to XYXY rectangle format."""
     xs = [p[0] for p in polygon]
     ys = [p[1] for p in polygon]

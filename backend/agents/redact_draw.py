@@ -1,3 +1,4 @@
+#redact_draw.py
 import os
 import logging
 from PIL import Image, ImageDraw

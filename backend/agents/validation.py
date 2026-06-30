@@ -1,9 +1,8 @@
-#validation.py
 import json
 import logging
 from agents.context_rules import ContextRules
 from agents.word_extractor import WordExtractor
-from agents.llm_client import call_groq_vision_json
+from agents.llm_client import call_groq_vision_json, call_groq_text_json
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +22,25 @@ Then separately, scan the image yourself for any PII that is NOT in the candidat
 Return strict JSON only:
 {"reviewed": [{"index": <int index into the candidates array>, "approved": true|false, "note": "..."}],
  "missed": [{"pii_type": "...", "text_value": "<exact text or short description for signature/photo>"}]}"""
+
+NAME_CHECK_SYSTEM_PROMPT = """You are a strict classifier. You will be given a JSON list of text strings
+that another system flagged as possibly being a person's full name (as it would appear on an ID, resume,
+or form).
+
+For each one, decide: is this ACTUALLY a real human personal name (first name + last name, or similar,
+the way a person's name is written on official documents)?
+
+Answer NO for: resume/document section headers, job titles, project titles, skill names, technology/tool
+names, company/organization names, dates, addresses, generic phrases, or any text that is not literally
+a person's name. Answer NO even if the text is capitalized and grammatically looks like a noun phrase —
+only the literal name of a human being counts as YES.
+
+If a candidate contains a real name merged with extra non-name words (e.g. a name accidentally joined
+with a city, date, or job title by an upstream OCR/extraction step), answer NO — only answer YES when the
+ENTIRE string is just the name itself, nothing else.
+
+Return strict JSON only:
+{"results": [{"index": <int>, "is_person_name": true|false}]}"""
 
 
 class ValidationAgent:
@@ -47,10 +65,16 @@ class ValidationAgent:
 
         # --- Stage 1: cheap local pre-filter (format/regex validation, free, no API call) ---
         prefiltered = []
+        seen = set()  # regex_detect and Scout both run independently and often catch the
+                       # same value — dedupe here so it doesn't get redacted/listed twice
         for d in all_detections:
             pii_type = d.get('pii_type', 'unknown')
             text_value = d.get('text_value', d.get('text', ''))
             bbox = d.get('bbox')
+
+            dedupe_key = (pii_type, text_value.strip().lower())
+            if dedupe_key in seen:
+                continue
 
             approved = True
             note = f'Approved {pii_type}'
@@ -70,9 +94,10 @@ class ValidationAgent:
                 approved, note, confidence = False, f'False positive name: {text_value}', 0.2
 
             if not approved:
-                logger.info(f"Stage1 rejected {pii_type}: {text_value} - {note}")
+                logger.info(f"⏭️ Stage1 rejected {pii_type}: {text_value} - {note}")
                 continue
 
+            seen.add(dedupe_key)
             prefiltered.append({
                 'pii_type': pii_type,
                 'text_value': text_value,
@@ -122,9 +147,9 @@ class ValidationAgent:
                         'flag_for_review': c['confidence'] < 0.7,
                         'validation_note': note
                     })
-                    logger.info(f"Approved {c['pii_type']} at bbox: {c['bbox']}")
+                    logger.info(f"✅ Approved {c['pii_type']} at bbox: {c['bbox']}")
                 else:
-                    logger.info(f"Rejected/needs-review {c['pii_type']}: {c['text_value']} - {note}")
+                    logger.info(f"⏭️ Rejected/needs-review {c['pii_type']}: {c['text_value']} - {note}")
 
             # Missed items Scout found visually — locate bbox locally before adding
             missed = review_result.get('missed', [])
@@ -137,7 +162,7 @@ class ValidationAgent:
                         continue
                     merged = WordExtractor.find_phrase_bbox(text_value, words)
                     if merged is None:
-                        logger.warning(f"Missed item '{text_value}' found by validator but no bbox "
+                        logger.warning(f"⚠️ Missed item '{text_value}' found by validator but no bbox "
                                         f"located — flagging for manual review instead of guessing")
                         continue
                     x0, y0, x1, y1 = merged
@@ -151,10 +176,10 @@ class ValidationAgent:
                         'flag_for_review': True,
                         'validation_note': f'Caught by validation-stage Scout review (missed by detection): {text_value}'
                     })
-                    logger.info(f"Added missed-item redaction {pii_type} at bbox: {bbox}")
+                    logger.info(f"✅ Added missed-item redaction {pii_type} at bbox: {bbox}")
         else:
             # Scout review unavailable — fall back to stage-1 approvals only, all flagged for review
-            logger.warning("Validation-stage Scout call failed — using local pre-filter results only")
+            logger.warning("⚠️ Validation-stage Scout call failed — using local pre-filter results only")
             for c in prefiltered:
                 if c['bbox'] is None:
                     continue
@@ -168,6 +193,14 @@ class ValidationAgent:
                     'validation_note': c['note'] + ' | Scout validation unavailable, local-only approval'
                 })
 
+        # --- Stage 3: dedicated LLM name classifier (real context understanding, not regex/spaCy) ---
+        # Scout's main detection pass and even its own visual review pass both still let resume
+        # noise like "AI Pothole Prediction" or "Projects RoadRupture" through as pii_type=name.
+        # This is a separate, narrowly-scoped, text-only call whose ONLY job is judging "is this
+        # string actually a human name" — a much easier, more reliable task for the model than
+        # detecting PII across a whole image at once.
+        final_redactions = self._filter_names_with_llm(final_redactions)
+
         # --- Risk scoring ---
         pii_types = [d.get('pii_type') for d in final_redactions]
         high_risk = ['aadhaar', 'pan', 'passport']
@@ -180,7 +213,7 @@ class ValidationAgent:
         else:
             risk = 'LOW'
 
-        logger.info(f"Validated {len(final_redactions)} items, Risk: {risk}")
+        logger.info(f"✅ Validated {len(final_redactions)} items, Risk: {risk}")
 
         return {
             'job_id': job_id,
@@ -189,3 +222,37 @@ class ValidationAgent:
             'missed_pii': [],
             'overall_risk': risk
         }
+
+    @staticmethod
+    def _filter_names_with_llm(final_redactions):
+        name_items = [(i, r) for i, r in enumerate(final_redactions) if r.get('pii_type') == 'name']
+        if not name_items:
+            return final_redactions
+
+        payload = [{'index': i, 'text_value': r['text_value']} for i, r in name_items]
+
+        result = call_groq_text_json(NAME_CHECK_SYSTEM_PROMPT, json.dumps(payload))
+
+        if not result:
+            logger.warning("⚠️ LLM name-check call failed — keeping name candidates as-is, unreviewed")
+            return final_redactions
+
+        verdicts = {
+            r['index']: r.get('is_person_name', True)
+            for r in result.get('results', []) if 'index' in r
+        }
+
+        filtered = []
+        for i, r in enumerate(final_redactions):
+            if r.get('pii_type') != 'name':
+                filtered.append(r)
+                continue
+            # default to keeping it if the model omitted this index, so a partial/odd
+            # response doesn't silently drop a name that was actually correct
+            is_name = verdicts.get(i, True)
+            if is_name:
+                filtered.append(r)
+            else:
+                logger.info(f"⏭️ LLM name-check rejected: {r['text_value']}")
+
+        return filtered

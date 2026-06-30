@@ -1,3 +1,4 @@
+#regex_patterns.py
 PATTERNS = {
     "name": r'\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)+\b',
     "aadhaar": r'\b\d{12}\b|\b\d{4}\s?\d{4}\s?\d{4}\b',
