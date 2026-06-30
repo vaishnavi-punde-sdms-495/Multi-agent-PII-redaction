@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent PII Detection</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0e1a;
+            color: #f1f5f9;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: #111827;
+            border-radius: 16px;
+            border: 1px solid #1e293b;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+            gap: 16px;
+            border-bottom: 1px solid #1e293b;
+            padding-bottom: 16px;
+        }
+
+        .header h1 {
+            font-size: 26px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header .subtitle { color: #94a3b8; font-size: 14px; margin-top: 2px; }
+
+        .health-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            background: #0f172a;
+            border: 1px solid #1e293b;
+            font-size: 13px;
+        }
+
+        .health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .health-dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+        .health-dot.offline { background: #ef4444; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        @media (max-width: 1024px) { .grid-2 { grid-template-columns: 1fr; } }
+
+        .card {
+            background: #0f172a;
+            border-radius: 12px;
+            border: 1px solid #1e293b;
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+
+        .card:last-child { margin-bottom: 0; }
+
+        .card-title {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 14px;
+            color: #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title .icon-label {
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            background: rgba(59,130,246,0.15);
+            border: 1px solid rgba(59,130,246,0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        .upload-zone {
+            border: 2px dashed #334155;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            position: relative;
+        }
+
+        .upload-zone:hover,
+        .upload-zone.drag-over {
+            border-color: #3b82f6;
+            background: rgba(59,130,246,0.05);
+        }
+
+        .upload-zone.drag-over::after {
+            content: 'Drop files here';
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            font-weight: 600;
+            color: #3b82f6;
+            background: rgba(59,130,246,0.1);
+            border-radius: 10px;
+        }
+
+        .upload-zone .upload-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: rgba(59,130,246,0.1);
+            border: 1px solid rgba(59,130,246,0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            margin: 0 auto 12px;
+        }
+
+        .upload-zone h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+        .upload-zone p { color: #94a3b8; font-size: 13px; }
+        .upload-zone .formats { color: #475569; font-size: 11px; margin-top: 6px; }
+
+        #fileInput { display: none; }
+
+        .file-list {
+            margin-top: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .file-list::-webkit-scrollbar { width: 4px; }
+        .file-list::-webkit-scrollbar-track { background: #0f172a; }
+        .file-list::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: #111827;
+            border-radius: 8px;
+            margin-bottom: 4px;
+            border: 1px solid #1e293b;
+            transition: border-color 0.2s;
+        }
+
+        .file-item:hover { border-color: #334155; }
+
+        .file-item .file-meta { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+        .file-item .file-icon { font-size: 16px; flex-shrink: 0; }
+        .file-item .file-info { min-width: 0; }
+        .file-item .name { font-size: 13px; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+        .file-item .size { font-size: 11px; color: #64748b; }
+        .file-item .remove-btn { background: none; border: none; color: #475569; cursor: pointer; font-size: 16px; padding: 2px 6px; border-radius: 4px; transition: all 0.2s; flex-shrink: 0; }
+        .file-item .remove-btn:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+
+        .status-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: #1e293b; color: #64748b; white-space: nowrap; flex-shrink: 0; }
+        .status-badge.done { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.25); }
+        .status-badge.processing { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.25); }
+
+        .btn {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-family: inherit;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover:not(:disabled) { background: #2563eb; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+        .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+        .btn-success { background: #22c55e; color: white; }
+        .btn-success:hover { background: #16a34a; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-outline { background: transparent; border: 1px solid #334155; color: #94a3b8; }
+        .btn-outline:hover { border-color: #3b82f6; color: #f1f5f9; }
+        .btn-sm { padding: 4px 12px; font-size: 12px; }
+        .btn-ghost { background: transparent; border: 1px solid #1e293b; color: #64748b; }
+        .btn-ghost:hover { background: #1e293b; color: #94a3b8; }
+
+        .pii-categories {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin: 10px 0;
+        }
+
+        .pii-category {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            border-radius: 16px;
+            background: #111827;
+            border: 1px solid #1e293b;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s ease;
+            user-select: none;
+        }
+
+        .pii-category:hover { border-color: #334155; }
+        .pii-category.active { border-color: #3b82f6; background: rgba(59,130,246,0.12); color: #93c5fd; }
+        .pii-category input[type=checkbox] { accent-color: #3b82f6; cursor: pointer; }
+
+        .custom-word-input {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .custom-word-input input {
+            flex: 1;
+            padding: 7px 12px;
+            border-radius: 8px;
+            background: #111827;
+            border: 1px solid #1e293b;
+            color: #f1f5f9;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .custom-word-input input:focus { border-color: #3b82f6; }
+        .custom-word-input input::placeholder { color: #475569; }
+
+        .custom-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 8px;
+        }
+
+        .custom-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: rgba(139,92,246,0.12);
+            border: 1px solid rgba(139,92,246,0.25);
+            font-size: 11px;
+            color: #a78bfa;
+        }
+
+        .custom-tag .remove { cursor: pointer; opacity: 0.6; transition: opacity 0.15s; }
+        .custom-tag .remove:hover { opacity: 1; }
+
+        .progress-container { display: none; }
+        .progress-container.show { display: block; }
+
+        .progress-steps {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            position: relative;
+        }
+
+        .progress-steps::before {
+            content: '';
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            right: 12px;
+            height: 1px;
+            background: #1e293b;
+            z-index: 0;
+        }
+
+        .step { text-align: center; flex: 1; position: relative; z-index: 1; }
+
+        .step-circle {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 2px solid #334155;
+            background: #0f172a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 6px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #475569;
+            transition: all 0.3s ease;
+        }
+
+        .step-circle.active {
+            border-color: #3b82f6;
+            background: #3b82f6;
+            color: white;
+            box-shadow: 0 0 12px rgba(59,130,246,0.4);
+        }
+
+        .step-circle.done {
+            border-color: #22c55e;
+            background: #22c55e;
+            color: white;
+        }
+
+        .step-label { font-size: 10px; color: #475569; }
+        .step-label.active { color: #93c5fd; }
+        .step-label.done { color: #4ade80; }
+
+        .progress-bar {
+            width: 100%;
+            height: 5px;
+            background: #1e293b;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            width: 0%;
+            transition: width 0.5s ease;
+            border-radius: 3px;
+        }
+
+        .status-text {
+            margin-top: 10px;
+            text-align: center;
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        .timeout-note { color: #f59e0b; font-size: 11px; margin-top: 6px; text-align: center; display: none; }
+
+        .result-container { display: none; }
+        .result-container.show { display: block; }
+
+        .summary-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .stat-item {
+            background: #111827;
+            padding: 12px 10px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #1e293b;
+        }
+
+        .stat-item .number { font-size: 22px; font-weight: 700; line-height: 1; }
+        .stat-item .label { font-size: 11px; color: #64748b; margin-top: 3px; }
+
+        .results-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .results-header span { font-size: 12px; color: #64748b; }
+        .results-header .select-btns { display: flex; gap: 6px; }
+
+        .result-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 12px;
+            background: #111827;
+            border-radius: 8px;
+            margin-bottom: 4px;
+            border: 1px solid #1e293b;
+            border-left: 3px solid #334155;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .result-item:hover { background: #0f172a; }
+        .result-item.selected { border-left-color: #3b82f6; }
+
+        .result-item .left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .result-item .left input[type=checkbox] { accent-color: #3b82f6; cursor: pointer; flex-shrink: 0; }
+
+        .result-item .pii-type {
+            font-weight: 600;
+            font-size: 11px;
+            min-width: 64px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .result-item .pii-value {
+            color: #f1f5f9;
+            font-size: 13px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .result-item .right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+        .confidence-bar {
+            width: 40px;
+            height: 4px;
+            background: #1e293b;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            border-radius: 2px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+            color: white;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .badge-name    { background: #dc2626; }
+        .badge-aadhaar { background: #7c3aed; }
+        .badge-pan     { background: #b45309; }
+        .badge-phone   { background: #1d4ed8; }
+        .badge-email   { background: #065f46; }
+        .badge-dob     { background: #9d174d; }
+        .badge-custom  { background: #5b21b6; }
+        .badge-voter_id        { background: #0e7490; }
+        .badge-passport        { background: #b45309; }
+        .badge-driving_license { background: #065f46; }
+        .badge-gst     { background: #713f12; }
+
+        .download-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 10px;
+            color: #60a5fa;
+            text-decoration: none;
+            padding: 7px 14px;
+            border: 1px solid rgba(59,130,246,0.25);
+            border-radius: 8px;
+            transition: all 0.2s;
+            font-size: 13px;
+            background: rgba(59,130,246,0.07);
+        }
+
+        .download-link:hover { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); }
+
+        .alert {
+            padding: 10px 14px;
+            border-radius: 8px;
+            margin-top: 10px;
+            font-size: 13px;
+            display: none;
+        }
+
+        .alert.show { display: block; }
+        .alert-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: #4ade80; }
+        .alert-error   { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); color: #f87171; }
+        .alert-info    { background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25); color: #60a5fa; }
+
+        .error { color: #f87171; margin-top: 8px; font-size: 13px; display: none; background: rgba(239,68,68,0.08); padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(239,68,68,0.2); }
+        .error.show { display: block; }
+
+        .preview-container { display: none; }
+        .preview-container.show { display: block; }
+
+        .preview-container .preview-wrapper {
+            position: relative;
+            display: block;
+            max-width: 100%;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #111827;
+            border: 1px solid #1e293b;
+        }
+
+        .preview-container .preview-wrapper img {
+            max-width: 100%;
+            max-height: 420px;
+            border-radius: 8px;
+            display: block;
+            width: 100%;
+            object-fit: contain;
+        }
+
+        .preview-placeholder {
+            padding: 40px;
+            text-align: center;
+            color: #334155;
+        }
+
+        .preview-placeholder .ph-icon { font-size: 36px; margin-bottom: 10px; opacity: 0.4; }
+        .preview-placeholder p { font-size: 13px; color: #475569; }
+
+        .preview-tabs {
+            display: flex;
+            gap: 2px;
+            background: #111827;
+            border-radius: 8px;
+            padding: 3px;
+            border: 1px solid #1e293b;
+            margin-bottom: 10px;
+            width: fit-content;
+        }
+
+        .preview-tab {
+            padding: 5px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            color: #64748b;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+
+        .preview-tab.active { background: #1e293b; color: #f1f5f9; }
+
+        .preview-actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+
+        .risk-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .risk-HIGH   { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
+        .risk-MEDIUM { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
+        .risk-LOW    { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.25); }
+
+        .empty-state { text-align: center; padding: 28px 20px; color: #475569; }
+        .empty-state .es-icon { font-size: 28px; margin-bottom: 8px; opacity: 0.5; }
+        .empty-state p { font-size: 13px; }
+
+        .sep { height: 1px; background: #1e293b; margin: 12px 0; }
+
+        .batch-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+        .footer {
+            margin-top: 24px;
+            padding-top: 14px;
+            border-top: 1px solid #1e293b;
+            font-size: 11px;
+            color: #334155;
+            text-align: center;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .footer span { color: #22c55e; }
+
+        #resultsList { max-height: 320px; overflow-y: auto; }
+        #resultsList::-webkit-scrollbar { width: 4px; }
+        #resultsList::-webkit-scrollbar-track { background: transparent; }
+        #resultsList::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+
+        @keyframes pulse-dot {
+            0%, 100% { box-shadow: 0 0 6px #22c55e88; }
+            50%       { box-shadow: 0 0 12px #22c55ecc; }
+        }
+
+        .health-dot.online { animation: pulse-dot 2.5s ease-in-out infinite; }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .spinner {
+            width: 14px; height: 14px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .pdf-placeholder {
+            padding: 40px 20px;
+            text-align: center;
+            color: #94a3b8;
+        }
+        .pdf-placeholder .ph-icon { font-size: 36px; margin-bottom: 10px; opacity: 0.7; }
+        .pdf-placeholder p { font-size: 13px; color: #94a3b8; margin-bottom: 4px; }
+        .pdf-placeholder .pdf-sub { font-size: 11px; color: #475569; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div>
+            <h1>Multi-Agent PII Detection</h1>
+            <div class="subtitle">AI-powered PII detection and redaction for Indian documents</div>
+        </div>
+        <div class="health-status">
+            <span class="health-dot online" id="healthDot"></span>
+            <span id="healthText">Connected</span>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div>
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon-label">↑</span>
+                    Upload Documents
+                </div>
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-icon">+</div>
+                    <h3>Drop documents here</h3>
+                    <p>or click to browse — multiple files allowed</p>
+                    <div class="formats">JPG · PNG · PDF · max 10 MB per file</div>
+                    <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf" multiple>
+                </div>
+                <div class="file-list" id="fileList">
+                    <div class="empty-state">
+                        <div class="es-icon">·</div>
+                        <p>No files added yet</p>
+                    </div>
+                </div>
+                <div class="batch-actions">
+                    <button class="btn btn-primary" id="processAllBtn"><span>Process All</span></button>
+                    <button class="btn btn-ghost btn-sm" id="clearAllBtn">Clear All</button>
+                </div>
+                <div class="error" id="error"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon-label">☰</span>
+                    PII Categories
+                </div>
+                <div class="pii-categories" id="piiCategories">
+                    <label class="pii-category active"><input type="checkbox" checked value="name"> Name</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="aadhaar"> Aadhaar</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="pan"> PAN</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="phone"> Phone</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="email"> Email</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="dob"> DOB</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="address"> Address</label>
+                    <label class="pii-category active"><input type="checkbox" checked value="license"> License</label>
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
+                    <button class="btn btn-outline btn-sm" id="selectAll">Select all</button>
+                    <button class="btn btn-outline btn-sm" id="deselectAll">Deselect all</button>
+                </div>
+                <div class="sep"></div>
+                <div>
+                    <label style="font-size:12px; color:#64748b;">Custom keywords</label>
+                    <div class="custom-word-input">
+                        <input type="text" id="customWordInput" placeholder="e.g. passport, voter_id">
+                        <button class="btn btn-primary btn-sm" id="addCustomWord">Add</button>
+                    </div>
+                    <div class="custom-tags" id="customTags"></div>
+                </div>
+            </div>
+
+            <div class="card progress-container" id="progressContainer">
+                <div class="card-title">
+                    <span class="icon-label">◎</span>
+                    Processing Pipeline
+                </div>
+                <div class="progress-steps">
+                    <div class="step"><div class="step-circle" id="step1">1</div><div class="step-label" id="stepLabel1">Preprocess</div></div>
+                    <div class="step"><div class="step-circle" id="step2">2</div><div class="step-label" id="stepLabel2">OCR</div></div>
+                    <div class="step"><div class="step-circle" id="step3">3</div><div class="step-label" id="stepLabel3">Detect</div></div>
+                    <div class="step"><div class="step-circle" id="step4">4</div><div class="step-label" id="stepLabel4">Validate</div></div>
+                    <div class="step"><div class="step-circle" id="step5">5</div><div class="step-label" id="stepLabel5">Redact</div></div>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+                <div class="status-text" id="statusText">Waiting to process...</div>
+                <div class="timeout-note" id="timeoutNote">Processing may take a few seconds for large files</div>
+            </div>
+        </div>
+
+        <div>
+            <div class="card result-container" id="resultContainer">
+                <div class="card-title" style="justify-content: space-between;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="icon-label">✓</span>
+                        Detection Results
+                    </div>
+                    <div id="riskBadgeContainer"></div>
+                </div>
+                <div class="summary-stats">
+                    <div class="stat-item">
+                        <div class="number" id="totalDetected" style="color:#60a5fa;">0</div>
+                        <div class="label">Items detected</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="number" id="riskScore">—</div>
+                        <div class="label">Risk level</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="number" id="selectedCount" style="color:#a78bfa;">0</div>
+                        <div class="label">Selected</div>
+                    </div>
+                </div>
+                <div class="results-header">
+                    <span id="resultsSubtitle">Select items to include in redaction</span>
+                    <div class="select-btns">
+                        <button class="btn btn-outline btn-sm" id="selectAllItems">All</button>
+                        <button class="btn btn-outline btn-sm" id="deselectAllItems">None</button>
+                    </div>
+                </div>
+                <div id="resultsList"></div>
+                <div id="downloadSection"></div>
+                <div class="alert" id="alert"></div>
+            </div>
+
+            <div class="card preview-container" id="previewContainer">
+                <div class="card-title">
+                    <span class="icon-label">◻</span>
+                    Preview
+                </div>
+                <div class="preview-tabs" id="previewTabs" style="display:none;">
+                    <button class="preview-tab active" id="tabOriginal" onclick="switchTab('original')">Original</button>
+                    <button class="preview-tab" id="tabRedacted" onclick="switchTab('redacted')">Highlighted</button>
+                </div>
+                <div class="preview-wrapper" id="previewWrapper">
+                    <img id="previewImage" src="" alt="Preview" style="display:none;">
+                    <div id="previewPlaceholder" class="preview-placeholder">
+                        <div class="ph-icon">·</div>
+                        <p>Upload an image to see preview</p>
+                    </div>
+                    <div id="pdfPlaceholder" class="pdf-placeholder" style="display:none;">
+                        <div class="ph-icon">📄</div>
+                        <p id="pdfPlaceholderText">PDF processed — page preview not shown inline</p>
+                        <div class="pdf-sub">Use the download button to get the fully redacted PDF</div>
+                    </div>
+                </div>
+                <div class="preview-actions" id="previewActions" style="display:none;">
+                    <button class="btn btn-success" id="redactBtn">Apply Redaction</button>
+                    <button class="btn btn-primary" id="downloadBtn">Download</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <span>●</span> Detection runs via local OCR + Groq Llama 4 Scout — only extracted text/image leaves for analysis, nothing is stored externally.
+    </div>
+</div>
+
+<script>
+    const API_URL = 'http://localhost:8000';
+    let selectedFiles = [];
+    let currentJobId = null;
+    let isProcessing = false;
+    let detectedItems = [];
+    let customWords = [];
+
+    // Per-result state for the currently displayed job
+    let originalImageUrl = null;     // local blob preview of the uploaded image (image jobs only)
+    let highlightedImageUrl = null;  // backend "preview" image: original + transparent red highlight boxes
+    let finalRedactedUrl = null;     // backend "redacted" output: black boxes (image) or full PDF
+    let currentFileType = 'image';   // 'image' | 'pdf'
+    let currentTab = 'original';
+
+    const $ = id => document.getElementById(id);
+    const uploadZone = $('uploadZone');
+    const fileInput = $('fileInput');
+    const fileList = $('fileList');
+    const processAllBtn = $('processAllBtn');
+    const clearAllBtn = $('clearAllBtn');
+    const progressContainer = $('progressContainer');
+    const progressFill = $('progressFill');
+    const statusText = $('statusText');
+    const resultContainer = $('resultContainer');
+    const resultsList = $('resultsList');
+    const downloadSection = $('downloadSection');
+    const alertBox = $('alert');
+    const totalDetected = $('totalDetected');
+    const riskScore = $('riskScore');
+    const selectedCount = $('selectedCount');
+    const timeoutNote = $('timeoutNote');
+    const errorDiv = $('error');
+    const healthText = $('healthText');
+    const healthDot = $('healthDot');
+    const previewContainer = $('previewContainer');
+    const previewImage = $('previewImage');
+    const previewPlaceholder = $('previewPlaceholder');
+    const pdfPlaceholder = $('pdfPlaceholder');
+    const pdfPlaceholderText = $('pdfPlaceholderText');
+    const previewActions = $('previewActions');
+    const redactBtn = $('redactBtn');
+    const downloadBtn = $('downloadBtn');
+    const piiCategories = $('piiCategories');
+    const customWordInput = $('customWordInput');
+    const addCustomWord = $('addCustomWord');
+    const customTags = $('customTags');
+    const selectAllBtn = $('selectAll');
+    const deselectAllBtn = $('deselectAll');
+
+    async function checkHealth() {
+        try {
+            const res = await fetch(API_URL + '/api/health');
+            if (res.ok) {
+                healthText.textContent = 'Online';
+                healthDot.className = 'health-dot online';
+            } else throw new Error();
+        } catch {
+            healthText.textContent = 'Offline';
+            healthDot.className = 'health-dot offline';
+        }
+    }
+    checkHealth();
+    setInterval(checkHealth, 10000);
+
+    piiCategories.addEventListener('click', e => {
+        const label = e.target.closest('.pii-category');
+        if (!label) return;
+        const cb = label.querySelector('input[type=checkbox]');
+        cb.checked = !cb.checked;
+        label.classList.toggle('active', cb.checked);
+    });
+
+    selectAllBtn.addEventListener('click', () => {
+        piiCategories.querySelectorAll('.pii-category').forEach(el => {
+            el.querySelector('input[type=checkbox]').checked = true;
+            el.classList.add('active');
+        });
+    });
+
+    deselectAllBtn.addEventListener('click', () => {
+        piiCategories.querySelectorAll('.pii-category').forEach(el => {
+            el.querySelector('input[type=checkbox]').checked = false;
+            el.classList.remove('active');
+        });
+    });
+
+    $('selectAllItems').addEventListener('click', () => {
+        document.querySelectorAll('.item-checkbox').forEach(cb => { cb.checked = true; updateParentStyle(cb); });
+        updateSelectedCount();
+    });
+
+    $('deselectAllItems').addEventListener('click', () => {
+        document.querySelectorAll('.item-checkbox').forEach(cb => { cb.checked = false; updateParentStyle(cb); });
+        updateSelectedCount();
+    });
+
+    addCustomWord.addEventListener('click', addCustomWordFn);
+    customWordInput.addEventListener('keydown', e => { if (e.key === 'Enter') addCustomWordFn(); });
+
+    function addCustomWordFn() {
+        const word = customWordInput.value.trim();
+        if (!word) return;
+        if (customWords.includes(word.toLowerCase())) { showAlert('Word already added.', 'info'); return; }
+        customWords.push(word.toLowerCase());
+        renderCustomTags();
+        customWordInput.value = '';
+    }
+
+    function removeCustomWord(word) {
+        customWords = customWords.filter(w => w !== word);
+        renderCustomTags();
+    }
+
+    function renderCustomTags() {
+        customTags.innerHTML = customWords.map(w =>
+            `<span class="custom-tag">${w} <span class="remove" onclick="removeCustomWord('${w}')">×</span></span>`
+        ).join('');
+    }
+
+    uploadZone.addEventListener('click', () => fileInput.click());
+
+    uploadZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        uploadZone.classList.add('drag-over');
+    });
+
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+
+    uploadZone.addEventListener('drop', e => {
+        e.preventDefault();
+        uploadZone.classList.remove('drag-over');
+        if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener('change', e => {
+        if (e.target.files.length) handleFiles(e.target.files);
+        fileInput.value = '';
+    });
+
+    // The only emoji kept in the UI — one glyph marking each file's type in the file list.
+    function getFileIcon(name) {
+        const ext = name.split('.').pop().toLowerCase();
+        if (ext === 'pdf') return '📄';
+        if (['jpg', 'jpeg', 'png'].includes(ext)) return '🖼';
+        return '·';
+    }
+
+    function handleFiles(files) {
+        for (const file of files) {
+            if (file.size > 10 * 1024 * 1024) {
+                showError('File too large: ' + file.name + ' (max 10 MB)');
+                continue;
+            }
+            if (!selectedFiles.find(f => f.name === file.name && f.size === file.size)) {
+                selectedFiles.push({
+                    file: file,
+                    name: file.name,
+                    size: file.size,
+                    status: 'pending',
+                    jobId: null,
+                    fileType: file.type === 'application/pdf' ? 'pdf' : 'image',
+                    types: [],
+                    count: 0,
+                    risk: '-',
+                    localPreviewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+                });
+            }
+        }
+        renderFileList();
+        hideError();
+
+        const imageFiles = selectedFiles.filter(f => f.localPreviewUrl);
+        if (imageFiles.length > 0) {
+            const last = imageFiles[imageFiles.length - 1];
+            currentFileType = 'image';
+            originalImageUrl = last.localPreviewUrl;
+            showOriginalPreview(last.localPreviewUrl);
+        }
+    }
+
+    function renderFileList() {
+        if (selectedFiles.length === 0) {
+            fileList.innerHTML = `<div class="empty-state"><div class="es-icon">·</div><p>No files added yet</p></div>`;
+            return;
+        }
+        fileList.innerHTML = selectedFiles.map((f, idx) => `
+            <div class="file-item">
+                <div class="file-meta">
+                    <span class="file-icon">${getFileIcon(f.name)}</span>
+                    <div class="file-info">
+                        <div class="name" title="${f.name}">${f.name}</div>
+                        <div class="size">${(f.size / 1024 / 1024).toFixed(2)} MB</div>
+                    </div>
+                    ${f.status === 'done'
+                        ? `<span class="status-badge done">${f.count} found</span>`
+                        : f.status === 'processing'
+                        ? `<span class="status-badge processing">Processing…</span>`
+                        : `<span class="status-badge">Pending</span>`}
+                </div>
+                <button class="remove-btn" onclick="removeFile(${idx})" title="Remove">×</button>
+            </div>
+        `).join('');
+    }
+
+    function removeFile(idx) {
+        selectedFiles.splice(idx, 1);
+        renderFileList();
+        if (selectedFiles.length === 0) resetResults();
+    }
+
+    clearAllBtn.addEventListener('click', () => {
+        selectedFiles = [];
+        renderFileList();
+        resetResults();
+    });
+
+    function showError(msg) {
+        errorDiv.textContent = msg;
+        errorDiv.classList.add('show');
+    }
+    function hideError() { errorDiv.classList.remove('show'); }
+
+    function showAlert(msg, type = 'info') {
+        alertBox.textContent = msg;
+        alertBox.className = 'alert show alert-' + type;
+    }
+    function hideAlert() { alertBox.className = 'alert'; }
+
+    function showOriginalPreview(url) {
+        previewContainer.classList.add('show');
+        previewImage.src = url;
+        previewImage.style.display = 'block';
+        previewPlaceholder.style.display = 'none';
+        pdfPlaceholder.style.display = 'none';
+        $('previewTabs').style.display = 'none';
+        previewActions.style.display = 'none';
+    }
+
+    function switchTab(tab) {
+        currentTab = tab;
+        $('tabOriginal').classList.toggle('active', tab === 'original');
+        $('tabRedacted').classList.toggle('active', tab === 'redacted');
+
+        if (tab === 'original') {
+            if (originalImageUrl) {
+                previewImage.style.display = 'block';
+                pdfPlaceholder.style.display = 'none';
+                previewImage.src = originalImageUrl;
+            } else {
+                previewImage.style.display = 'none';
+                pdfPlaceholder.style.display = 'block';
+                pdfPlaceholderText.textContent = 'PDF uploaded — original preview not shown inline';
+            }
+        } else {
+            // "Highlighted" tab — show the transparent-highlight preview image from the backend,
+            // not the final black-box redacted file (that's reserved for the actual download).
+            if (currentFileType === 'pdf') {
+                previewImage.style.display = 'none';
+                pdfPlaceholder.style.display = 'block';
+                pdfPlaceholderText.textContent = 'PDF processed — showing detected items below; download the redacted PDF for the final output';
+            } else if (highlightedImageUrl) {
+                previewImage.style.display = 'block';
+                pdfPlaceholder.style.display = 'none';
+                previewImage.src = API_URL + highlightedImageUrl + '?t=' + Date.now();
+            }
+        }
+    }
+
+    function resetResults() {
+        resultContainer.classList.remove('show');
+        previewContainer.classList.remove('show');
+        previewImage.style.display = 'none';
+        previewPlaceholder.style.display = 'block';
+        pdfPlaceholder.style.display = 'none';
+        previewActions.style.display = 'none';
+        $('previewTabs').style.display = 'none';
+        resultsList.innerHTML = '';
+        downloadSection.innerHTML = '';
+        totalDetected.textContent = '0';
+        riskScore.textContent = '—';
+        selectedCount.textContent = '0';
+        detectedItems = [];
+        originalImageUrl = null;
+        highlightedImageUrl = null;
+        finalRedactedUrl = null;
+        $('riskBadgeContainer').innerHTML = '';
+        hideAlert();
+    }
+
+    function updateSteps(status) {
+        const steps = ['pending', 'preprocessing', 'regex_detection', 'detecting', 'validating', 'redacting'];
+        const current = steps.indexOf(status);
+        for (let i = 1; i <= 5; i++) {
+            const circle = $('step' + i);
+            const label = $('stepLabel' + i);
+            circle.className = 'step-circle';
+            label.className = 'step-label';
+            if (i < current) {
+                circle.classList.add('done');
+                circle.textContent = '✓';
+                label.classList.add('done');
+            } else if (i === current) {
+                circle.classList.add('active');
+                circle.textContent = i;
+                label.classList.add('active');
+            } else {
+                circle.textContent = i;
+            }
+        }
+    }
+
+    processAllBtn.addEventListener('click', async function() {
+        if (selectedFiles.length === 0) { showError('No files to process.'); return; }
+        if (isProcessing) return;
+
+        isProcessing = true;
+        this.innerHTML = '<div class="spinner"></div><span>Processing…</span>';
+        this.disabled = true;
+        hideError();
+        resetResults();
+
+        for (let idx = 0; idx < selectedFiles.length; idx++) {
+            const fileData = selectedFiles[idx];
+            if (fileData.status === 'done') continue;
+            fileData.status = 'processing';
+            renderFileList();
+            try {
+                await processSingleFile(fileData, idx);
+                fileData.status = 'done';
+                renderFileList();
+            } catch (err) {
+                fileData.status = 'pending';
+                renderFileList();
+                showError('Failed: ' + fileData.name);
+            }
+        }
+
+        isProcessing = false;
+        this.innerHTML = '<span>Process All</span>';
+        this.disabled = false;
+        showAlert('All files processed!', 'success');
+    });
+
+    async function processSingleFile(fileData, idx) {
+        const formData = new FormData();
+        formData.append('file', fileData.file);
+
+        progressContainer.classList.add('show');
+        progressFill.style.width = '0%';
+        statusText.textContent = 'Uploading ' + fileData.name + '…';
+
+        const res = await fetch(API_URL + '/api/upload', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('Upload failed');
+
+        const data = await res.json();
+        fileData.jobId = data.job_id;
+        fileData.fileType = data.file_type || fileData.fileType;
+        currentJobId = data.job_id;
+
+        await pollStatus(fileData.jobId, fileData);
+    }
+
+    function pollStatus(jobId, fileData) {
+        return new Promise(resolve => {
+            let attempts = 0;
+            let timeoutShown = false;
+
+            const interval = setInterval(async () => {
+                attempts++;
+                try {
+                    const res = await fetch(API_URL + '/api/jobs/' + jobId + '/status');
+                    const data = await res.json();
+
+                    progressFill.style.width = data.progress + '%';
+                    let statusLabel = data.status.replace(/_/g, ' ') + ' (' + data.progress + '%)';
+                    if (data.file_type === 'pdf' && data.page_count) {
+                        statusLabel += ' — page ' + Math.min(data.pages_done + 1, data.page_count) + '/' + data.page_count;
+                    }
+                    statusText.textContent = statusLabel;
+                    updateSteps(data.status);
+
+                    if (attempts > 10 && !timeoutShown && data.status !== 'completed' && data.status !== 'failed') {
+                        timeoutNote.style.display = 'block';
+                        timeoutShown = true;
+                    }
+
+                    if (data.status === 'completed') {
+                        clearInterval(interval);
+                        statusText.textContent = 'Completed';
+                        timeoutNote.style.display = 'none';
+                        await fetchResults(jobId, fileData);
+                        resolve();
+                    } else if (data.status === 'failed') {
+                        clearInterval(interval);
+                        statusText.textContent = 'Failed';
+                        showError('Processing failed for ' + fileData.name + (data.error_message ? (': ' + data.error_message) : ''));
+                        resolve();
+                    }
+                } catch (err) { console.error('Poll error:', err); }
+            }, 2000);
+        });
+    }
+
+    async function fetchResults(jobId, fileData) {
+        try {
+            const res = await fetch(API_URL + '/api/jobs/' + jobId + '/result');
+            const data = await res.json();
+
+            resultContainer.classList.add('show');
+            currentFileType = data.file_type || 'image';
+
+            const summary = data.pii_summary || {};
+            const types   = summary.types || [];
+            const count   = summary.count || 0;
+            const risk    = summary.risk_score || 'UNKNOWN';
+
+            const items = data.detected_items || [];
+
+            fileData.types = types;
+            fileData.count = count;
+            fileData.risk  = risk;
+            renderFileList();
+
+            totalDetected.textContent = count || items.length;
+            const riskColors = { HIGH: '#f87171', MEDIUM: '#fbbf24', LOW: '#4ade80' };
+            riskScore.textContent = risk;
+            riskScore.style.color = riskColors[risk] || '#94a3b8';
+
+            $('riskBadgeContainer').innerHTML = `<span class="risk-badge risk-${risk}">${risk} risk</span>`;
+
+            const badgeClass = type => {
+                const map = { name:'badge-name', aadhaar:'badge-aadhaar', pan:'badge-pan', phone:'badge-phone', email:'badge-email', dob:'badge-dob', voter_id:'badge-voter_id', passport:'badge-passport', driving_license:'badge-driving_license', gst:'badge-gst' };
+                return map[(type || '').toLowerCase()] || 'badge-custom';
+            };
+
+            const confColor = c => c >= 0.85 ? '#4ade80' : c >= 0.65 ? '#fbbf24' : '#f87171';
+
+            if (items.length > 0) {
+                detectedItems = items;
+                let html = '';
+                items.forEach((item, idx) => {
+                    const piiType = item.pii_type || 'unknown';
+                    const value   = item.text_value && item.text_value.trim() ? item.text_value : '(value not captured)';
+                    const conf    = item.confidence != null ? item.confidence : 0.9;
+                    const confPct = Math.round(conf * 100);
+                    const cls     = badgeClass(piiType);
+                    const pageTag = (item.page !== undefined) ? ` <span style="color:#64748b; font-size:10px;">p.${item.page + 1}</span>` : '';
+                    html += `
+                        <div class="result-item selected" id="ri-${idx}">
+                            <div class="left">
+                                <input type="checkbox" class="item-checkbox" checked data-idx="${idx}">
+                                <span class="pii-type">${piiType}</span>
+                                <span class="pii-value" title="${value}">${value}${pageTag}</span>
+                            </div>
+                            <div class="right">
+                                <div class="confidence-bar" title="${confPct}% confidence">
+                                    <div class="confidence-fill" style="width:${confPct}%; background:${confColor(conf)};"></div>
+                                </div>
+                                <span class="badge ${cls}">${piiType}</span>
+                            </div>
+                        </div>
+                    `;
+                });
+                resultsList.innerHTML = html;
+                selectedCount.textContent = items.length;
+
+            } else if (types.length > 0) {
+                // Fallback only — audit log had types but no per-item values were stored
+                let html = '';
+                types.forEach((type, idx) => {
+                    const cls = badgeClass(type);
+                    html += `
+                        <div class="result-item selected" id="ri-${idx}">
+                            <div class="left">
+                                <input type="checkbox" class="item-checkbox" checked data-idx="${idx}">
+                                <span class="pii-type">${type}</span>
+                                <span class="pii-value" style="color:#64748b; font-style:italic;">value not captured</span>
+                            </div>
+                            <div class="right">
+                                <span class="badge ${cls}">${type}</span>
+                            </div>
+                        </div>
+                    `;
+                });
+                resultsList.innerHTML = html;
+                selectedCount.textContent = types.length;
+
+            } else {
+                resultsList.innerHTML = `<div class="empty-state"><div class="es-icon">✓</div><p>No PII detected in this document</p></div>`;
+                selectedCount.textContent = '0';
+            }
+
+            resultsList.querySelectorAll('.item-checkbox').forEach(cb => {
+                cb.addEventListener('change', function() {
+                    updateParentStyle(this);
+                    updateSelectedCount();
+                });
+            });
+
+            // --- Preview + download wiring ---
+            previewContainer.classList.add('show');
+            previewActions.style.display = 'flex';
+
+            if (currentFileType === 'pdf') {
+                finalRedactedUrl = data.redacted_pdf_url || null;
+                highlightedImageUrl = data.preview_image_url || null;
+
+                if (highlightedImageUrl) {
+                    previewImage.src = API_URL + highlightedImageUrl + '?t=' + Date.now();
+                    previewImage.style.display = 'block';
+                    pdfPlaceholder.style.display = 'none';
+                } else {
+                    previewImage.style.display = 'none';
+                    pdfPlaceholder.style.display = 'block';
+                    pdfPlaceholderText.textContent = 'PDF processed — page preview not available, download the redacted PDF below';
+                }
+                previewPlaceholder.style.display = 'none';
+                $('previewTabs').style.display = 'none';
+
+                if (finalRedactedUrl) {
+                    downloadSection.innerHTML = `<a href="${API_URL}${finalRedactedUrl}" class="download-link" target="_blank">Download redacted PDF (${data.page_count || '?'} pages)</a>`;
+                }
+            } else {
+                finalRedactedUrl = data.redacted_image_url || null;
+                highlightedImageUrl = data.preview_image_url || null;
+
+                if (highlightedImageUrl) {
+                    previewImage.src = API_URL + highlightedImageUrl + '?t=' + Date.now();
+                    previewImage.style.display = 'block';
+                    previewPlaceholder.style.display = 'none';
+                    pdfPlaceholder.style.display = 'none';
+                    currentTab = 'redacted';
+                    if (originalImageUrl) {
+                        $('previewTabs').style.display = 'flex';
+                        switchTab('redacted');
+                    }
+                } else if (finalRedactedUrl) {
+                    // no highlight preview available — fall back to showing the final redacted image
+                    previewImage.src = API_URL + finalRedactedUrl + '?t=' + Date.now();
+                    previewImage.style.display = 'block';
+                    previewPlaceholder.style.display = 'none';
+                    pdfPlaceholder.style.display = 'none';
+                }
+
+                if (finalRedactedUrl) {
+                    downloadSection.innerHTML = `<a href="${API_URL}${finalRedactedUrl}" class="download-link" target="_blank">Download redacted image</a>`;
+                }
+            }
+
+            showAlert('Detection complete — review selections before downloading.', 'success');
+        } catch (err) {
+            showError('Error fetching results: ' + err.message);
+        }
+    }
+
+    function updateParentStyle(cb) {
+        const row = document.getElementById('ri-' + cb.dataset.idx);
+        if (row) row.classList.toggle('selected', cb.checked);
+    }
+
+    function updateSelectedCount() {
+        selectedCount.textContent = document.querySelectorAll('.item-checkbox:checked').length;
+    }
+
+    redactBtn.addEventListener('click', function() {
+        const checked = document.querySelectorAll('.item-checkbox:checked').length;
+        if (checked === 0) { showAlert('No items selected for redaction.', 'info'); return; }
+
+        if (currentFileType === 'pdf') {
+            showAlert('PDF redaction is already applied across all pages — use Download to get the final file.', 'info');
+            return;
+        }
+
+        if (finalRedactedUrl) {
+            previewImage.src = API_URL + finalRedactedUrl + '?t=' + Date.now();
+            showAlert('Showing final redacted output for ' + checked + ' item' + (checked > 1 ? 's' : '') + '.', 'success');
+        } else {
+            showAlert('Redacted output not available yet.', 'error');
+        }
+    });
+
+    downloadBtn.addEventListener('click', function() {
+        if (!finalRedactedUrl) {
+            showAlert('Nothing to download yet.', 'info');
+            return;
+        }
+        const link = document.createElement('a');
+        link.href = API_URL + finalRedactedUrl;
+        link.download = currentFileType === 'pdf' ? 'redacted_document.pdf' : 'redacted_image.jpg';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showAlert('Downloading redacted ' + (currentFileType === 'pdf' ? 'PDF…' : 'image…'), 'success');
+    });
+
+    console.log('Multi-Agent PII Detection UI ready');
+</script>
+</body>
+</html>
