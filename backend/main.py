@@ -1,17 +1,20 @@
-#main.py
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional
 import uuid
 import os
 import sys
 import json
+import shutil
+from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import settings
 from database import init_db, engine
 from tasks.pipeline import process_document_chain
 from agents.pdf_utils import is_pdf
+from agents.redact_draw import draw_redactions
 from models.job import Job
 from database import SessionLocal
 from sqlalchemy import text
@@ -39,7 +42,10 @@ async def startup():
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    custom_words: Optional[str] = Form(None)  # JSON array string e.g. '["passport","voter_id"]'
+):
     try:
         print(f"Received file: {file.filename}")
 
@@ -62,6 +68,17 @@ async def upload_file(file: UploadFile = File(...)):
         with open(file_path, 'wb') as f:
             f.write(content)
 
+        # Parse custom_words JSON array sent by the frontend
+        parsed_custom_words = []
+        if custom_words:
+            try:
+                parsed = json.loads(custom_words)
+                if isinstance(parsed, list):
+                    parsed_custom_words = [str(w).lower().strip() for w in parsed if str(w).strip()]
+            except Exception:
+                parsed_custom_words = []
+        print(f"Custom words for job {job_id}: {parsed_custom_words}")
+
         db = SessionLocal()
         job = Job(
             id=job_id,
@@ -77,7 +94,7 @@ async def upload_file(file: UploadFile = File(...)):
 
         print(f"Job created: {job_id} ({file_type})")
 
-        result = process_document_chain(job_id, file_path)
+        result = process_document_chain(job_id, file_path, custom_words=parsed_custom_words)
         print(f"Task started: {result.id}")
 
         return {"job_id": job_id, "status": "pending", "file_type": file_type, "message": "Job queued"}
@@ -143,8 +160,6 @@ async def get_result(job_id: str):
     if job.file_type == 'pdf':
         if job.redacted_pdf_path and os.path.exists(job.redacted_pdf_path):
             redacted_url = f"/api/files/redacted-pdf/{job_id}.pdf"
-        
-        # Check multiple preview path patterns
         preview_patterns = [
             os.path.join(settings.STORAGE_PATH, 'preview', f'{job_id}_page0_preview.jpg'),
             os.path.join(settings.STORAGE_PATH, 'preview', f'{job_id}_page_0_preview.jpg'),
@@ -172,19 +187,18 @@ async def get_result(job_id: str):
         try:
             raw = audit.agent_decisions
             decisions = json.loads(raw) if isinstance(raw, str) else raw
-            
-            # Try to get final_redactions from the flattened list first (new PDF structure)
+
             redactions = decisions.get('final_redactions', [])
-            
-            # If flattened list is empty, try pages structure (old PDF structure)
+
+            # Fallback: old PDF structure stored only 'pages', no flat list
             if not redactions and 'pages' in decisions:
-                for page in decisions.get('pages', []):
+                for page in decisions['pages']:
                     page_num = page.get('page', 0)
                     for r in page.get('final_redactions', []):
-                        r['page'] = page_num
-                        redactions.append(r)
-            
-            # Build detected_items from redactions
+                        r_copy = dict(r)
+                        r_copy['page'] = page_num
+                        redactions.append(r_copy)
+
             for r in redactions:
                 if not r.get('approved', False):
                     continue
@@ -215,6 +229,125 @@ async def get_result(job_id: str):
             "risk_score": risk_score,
             "requires_review": requires_review
         }
+    }
+
+
+# NEW: Endpoint for on-demand redaction with selected bboxes
+@app.post("/api/jobs/{job_id}/redact")
+async def redact_with_selected_bboxes(
+    job_id: str,
+    selected_bboxes: list = None  # List of bbox coordinates to redact
+):
+    """
+    Redraw redaction boxes on the original image using only the selected bboxes.
+    Accepts a list of bbox arrays: [[x1,y1,x2,y2], ...]
+    """
+    db = SessionLocal()
+    job = db.query(Job).filter(Job.id == job_id).first()
+    db.close()
+    
+    if not job:
+        raise HTTPException(404, "Job not found")
+    
+    if job.file_type == 'pdf':
+        raise HTTPException(400, "PDF redaction with selected bboxes is not yet supported")
+    
+    # Get the original image path
+    original_path = job.original_image_path
+    if not os.path.exists(original_path):
+        # Try to get the enhanced/preprocessed image path
+        enhanced_path = os.path.join(settings.STORAGE_PATH, 'enhanced', f'{job_id}.jpg')
+        if os.path.exists(enhanced_path):
+            original_path = enhanced_path
+        else:
+            raise HTTPException(404, "Original image not found")
+    
+    # Get the audit log to access the original redactions (for metadata like pii_type)
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT * FROM audit_logs WHERE job_id = :job_id ORDER BY created_at DESC LIMIT 1"),
+            {"job_id": job_id}
+        )
+        audit = result.fetchone()
+    
+    if not audit:
+        raise HTTPException(404, "Audit log not found")
+    
+    # Build final_redactions from selected bboxes
+    # Each bbox needs to be in the format expected by draw_redactions
+    final_redactions = []
+    
+    # Try to get pii_type for each bbox from the stored redactions
+    detected_items = []
+    if audit and audit.agent_decisions:
+        try:
+            raw = audit.agent_decisions
+            decisions = json.loads(raw) if isinstance(raw, str) else raw
+            redactions = decisions.get('final_redactions', [])
+            
+            # Fallback: old PDF structure
+            if not redactions and 'pages' in decisions:
+                for page in decisions['pages']:
+                    for r in page.get('final_redactions', []):
+                        redactions.append(r)
+            
+            # Store all approved redactions for reference
+            for r in redactions:
+                if r.get('approved', False) and r.get('bbox'):
+                    detected_items.append({
+                        'pii_type': r.get('pii_type', 'unknown'),
+                        'bbox': r.get('bbox'),
+                        'text_value': r.get('text_value', ''),
+                    })
+        except Exception as e:
+            print(f"Warning: could not parse agent_decisions for job {job_id}: {e}")
+    
+    # Match selected bboxes with their pii_type from detected_items
+    for bbox in selected_bboxes:
+        # Try to find matching pii_type
+        pii_type = 'unknown'
+        for item in detected_items:
+            item_bbox = item.get('bbox')
+            if item_bbox and len(item_bbox) == 4 and len(bbox) == 4:
+                # Check if bboxes match approximately
+                if (abs(item_bbox[0] - bbox[0]) < 5 and 
+                    abs(item_bbox[1] - bbox[1]) < 5 and
+                    abs(item_bbox[2] - bbox[2]) < 5 and
+                    abs(item_bbox[3] - bbox[3]) < 5):
+                    pii_type = item.get('pii_type', 'unknown')
+                    break
+        
+        final_redactions.append({
+            'pii_type': pii_type,
+            'bbox': bbox,
+            'approved': True,
+            'text_value': 'Selected by user'
+        })
+    
+    if not final_redactions:
+        raise HTTPException(400, "No valid bboxes provided")
+    
+    # Generate new redacted image
+    preview_path = os.path.join(settings.STORAGE_PATH, 'preview', f'{job_id}_custom_preview.jpg')
+    redacted_path = os.path.join(settings.STORAGE_PATH, 'redacted', f'{job_id}_custom.jpg')
+    
+    redacted_count, pii_types = draw_redactions(
+        original_path, 
+        final_redactions, 
+        preview_path, 
+        redacted_path
+    )
+    
+    if redacted_count == 0:
+        raise HTTPException(400, "No items were redacted")
+    
+    # Return the new redacted image URL
+    return {
+        "job_id": job_id,
+        "redacted_image_url": f"/api/images/redacted/{job_id}_custom.jpg",
+        "preview_image_url": f"/api/images/preview/{job_id}_custom_preview.jpg",
+        "items_redacted": redacted_count,
+        "pii_types": list(pii_types)
     }
 
 

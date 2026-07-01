@@ -37,12 +37,14 @@
         }
 
         .header h1 {
-            font-size: 26px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
+    font-size: 26px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    -webkit-background-clip: text;
+    background-clip: text;  /* ← Add this line for standard property */
+    -webkit-text-fill-color: transparent;
+    color: transparent;      /* ← Fallback for browsers that don't support background-clip */
+}
 
         .header .subtitle { color: #94a3b8; font-size: 14px; margin-top: 2px; }
 
@@ -1137,6 +1139,10 @@
     async function processSingleFile(fileData, idx) {
         const formData = new FormData();
         formData.append('file', fileData.file);
+        // Send custom keywords so the backend regex agent can match them
+        if (customWords.length > 0) {
+            formData.append('custom_words', JSON.stringify(customWords));
+        }
 
         progressContainer.classList.add('show');
         progressFill.style.width = '0%';
@@ -1355,22 +1361,182 @@
         selectedCount.textContent = document.querySelectorAll('.item-checkbox:checked').length;
     }
 
-    redactBtn.addEventListener('click', function() {
-        const checked = document.querySelectorAll('.item-checkbox:checked').length;
-        if (checked === 0) { showAlert('No items selected for redaction.', 'info'); return; }
-
-        if (currentFileType === 'pdf') {
-            showAlert('PDF redaction is already applied across all pages — use Download to get the final file.', 'info');
-            return;
-        }
-
-        if (finalRedactedUrl) {
-            previewImage.src = API_URL + finalRedactedUrl + '?t=' + Date.now();
-            showAlert('Showing final redacted output for ' + checked + ' item' + (checked > 1 ? 's' : '') + '.', 'success');
-        } else {
-            showAlert('Redacted output not available yet.', 'error');
+redactBtn.addEventListener('click', async function() {
+    const checkedBoxes = document.querySelectorAll('.item-checkbox:checked');
+    if (checkedBoxes.length === 0) {
+        showAlert('No items selected for redaction.', 'info');
+        return;
+    }
+    
+    // Collect selected bboxes
+    const selectedBboxes = [];
+    checkedBoxes.forEach(cb => {
+        const idx = parseInt(cb.dataset.idx);
+        if (detectedItems && detectedItems[idx]) {
+            const item = detectedItems[idx];
+            if (item.bbox) {
+                selectedBboxes.push(item.bbox);
+            }
         }
     });
+    
+    if (selectedBboxes.length === 0) {
+        showAlert('Selected items have no bbox data.', 'info');
+        return;
+    }
+    
+    try {
+        this.disabled = true;
+        this.innerHTML = '<div class="spinner"></div><span>Applying…</span>';
+        
+        const response = await fetch(`${API_URL}/api/jobs/${currentJobId}/redact`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(selectedBboxes)
+        });
+        
+        if (!response.ok) {
+            throw new Error('Redaction failed');
+        }
+        
+        const data = await response.json();
+        
+        // Update the preview with the new redacted image
+        if (data.redacted_image_url) {
+            redactedImageUrl = data.redacted_image_url;
+            previewImage.src = API_URL + data.redacted_image_url + '?t=' + Date.now();
+            previewImage.style.display = 'block';
+            previewPlaceholder.style.display = 'none';
+            
+            // Update download button
+            downloadSection.innerHTML = `<a href="${API_URL}${data.redacted_image_url}" class="download-link" target="_blank">↓ Download redacted image</a>`;
+            
+            // Show original/redacted tabs
+            if (originalImageUrl) {
+                $('previewTabs').style.display = 'flex';
+                switchTab('redacted');
+            }
+            
+            showAlert(`Redaction applied to ${data.items_redacted} items.`, 'success');
+        }
+    } catch (err) {
+        showAlert('Error applying redaction: ' + err.message, 'error');
+    } finally {
+        this.disabled = false;
+        this.innerHTML = 'Apply Redaction';
+    }
+});
+
+// Update fetchResults to store detectedItems globally
+async function fetchResults(jobId, fileData) {
+    try {
+        const res = await fetch(API_URL + '/api/jobs/' + jobId + '/result');
+        const data = await res.json();
+
+        resultContainer.classList.add('show');
+
+        const summary = data.pii_summary || {};
+        const types   = summary.types || [];
+        const count   = summary.count || 0;
+        const risk    = summary.risk_score || 'UNKNOWN';
+
+        const items = data.detected_items || [];
+        
+        // Store globally for redactBtn
+        detectedItems = items;
+        
+        // Store current job ID
+        currentJobId = jobId;
+
+        fileData.types = types;
+        fileData.count = count;
+        fileData.risk  = risk;
+        renderFileList();
+
+        totalDetected.textContent = count || items.length;
+        const riskColors = { HIGH: '#f87171', MEDIUM: '#fbbf24', LOW: '#4ade80' };
+        riskScore.textContent = risk;
+        riskScore.style.color = riskColors[risk] || '#94a3b8';
+
+        $('riskBadgeContainer').innerHTML = `<span class="risk-badge risk-${risk}">${risk} risk</span>`;
+
+        const badgeClass = type => {
+            const map = { name:'badge-name', aadhaar:'badge-aadhaar', pan:'badge-pan', phone:'badge-phone', email:'badge-email', dob:'badge-dob', voter_id:'badge-voter_id', passport:'badge-passport', driving_license:'badge-driving_license', gst:'badge-gst' };
+            return map[type.toLowerCase()] || 'badge-custom';
+        };
+
+        const confColor = c => c >= 0.85 ? '#4ade80' : c >= 0.65 ? '#fbbf24' : '#f87171';
+
+        if (items.length > 0) {
+            let html = '';
+            items.forEach((item, idx) => {
+                const piiType = item.pii_type || 'unknown';
+                const value   = item.text_value || '—';
+                const conf    = item.confidence || 0.9;
+                const confPct = Math.round(conf * 100);
+                const cls     = badgeClass(piiType);
+                html += `
+                    <div class="result-item selected" id="ri-${idx}">
+                        <div class="left">
+                            <input type="checkbox" class="item-checkbox" checked data-idx="${idx}">
+                            <span class="pii-type">${piiType}</span>
+                            <span class="pii-value" title="${value}">${value}</span>
+                        </div>
+                        <div class="right">
+                            <div class="confidence-bar" title="${confPct}% confidence">
+                                <div class="confidence-fill" style="width:${confPct}%; background:${confColor(conf)};"></div>
+                            </div>
+                            <span class="badge ${cls}">${piiType}</span>
+                        </div>
+                    </div>
+                `;
+            });
+            resultsList.innerHTML = html;
+            selectedCount.textContent = items.length;
+
+        } else {
+            resultsList.innerHTML = `<div class="empty-state"><div class="es-icon">✓</div><p>No PII detected in this document</p></div>`;
+            selectedCount.textContent = '0';
+        }
+
+        // Attach checkbox event listeners
+        resultsList.querySelectorAll('.item-checkbox').forEach(cb => {
+            cb.addEventListener('change', function() {
+                updateParentStyle(this);
+                updateSelectedCount();
+            });
+        });
+
+        if (data.redacted_image_url || data.redacted_pdf_url) {
+            if (data.redacted_image_url) {
+                redactedImageUrl = data.redacted_image_url;
+                downloadSection.innerHTML = `<a href="${API_URL}${data.redacted_image_url}" class="download-link" target="_blank">↓ Download redacted image</a>`;
+            } else if (data.redacted_pdf_url) {
+                downloadSection.innerHTML = `<a href="${API_URL}${data.redacted_pdf_url}" class="download-link" target="_blank">↓ Download redacted PDF</a>`;
+            }
+
+            previewContainer.classList.add('show');
+            
+            if (data.redacted_image_url) {
+                previewImage.src = API_URL + data.redacted_image_url + '?t=' + Date.now();
+                previewImage.style.display = 'block';
+                previewPlaceholder.style.display = 'none';
+                previewActions.style.display = 'flex';
+            }
+
+            if (originalImageUrl) {
+                $('previewTabs').style.display = 'flex';
+                switchTab('redacted');
+            }
+        }
+
+        showAlert('Detection complete — review selections before applying redaction.', 'success');
+    } catch (err) {
+        showError('Error fetching results: ' + err.message);
+    }
+}
 
     downloadBtn.addEventListener('click', function() {
         if (!finalRedactedUrl) {

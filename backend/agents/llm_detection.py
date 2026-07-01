@@ -43,21 +43,14 @@ USER_PROMPT = "Find all PII in this document image and return the JSON described
 
 
 class LLMVisionDetectionAgent:
-    """
-    Detection brain = Llama 4 Scout reading the image directly.
-    Bbox locator = local Tesseract OCR (word_extractor), used only to map
-    Scout's returned text back to exact pixel coordinates.
-    """
-
     def process(self, data):
         job_id = data['job_id']
         enhanced_path = data.get('enhanced_image_path')
         img_w = data.get('original_w', 1200)
         img_h = data.get('original_h', 800)
 
-        # Local OCR — used ONLY for bbox lookup, not for detection logic
         words, actual_w, actual_h = WordExtractor.extract_words(enhanced_path)
-        logger.info(f"📝 Local OCR (bbox locator): {len(words)} words")
+        logger.info(f"Local OCR (bbox locator): {len(words)} words")
 
         vision_detections = []
         detected_values = []
@@ -65,8 +58,7 @@ class LLMVisionDetectionAgent:
         result = call_groq_vision_json(SYSTEM_PROMPT, USER_PROMPT, enhanced_path)
 
         if not result:
-            logger.warning("⚠️ Scout vision call failed/empty — falling back to empty detection set "
-                            "for this stage (regex_detect stage still covers mandatory patterns)")
+            logger.warning("Scout vision call failed/empty — falling back to regex-only detections")
         else:
             for d in result.get('detections', []):
                 pii_type = d.get('pii_type', 'unknown')
@@ -78,7 +70,6 @@ class LLMVisionDetectionAgent:
                 if dedupe_key in detected_values:
                     continue
 
-                # Lightweight format sanity-check using your existing rules, where applicable
                 valid = True
                 if pii_type == 'aadhaar':
                     valid = ContextRules.is_valid_aadhaar(text_value)
@@ -92,24 +83,22 @@ class LLMVisionDetectionAgent:
                     valid = ContextRules.is_valid_dob(text_value)
                 elif pii_type == 'name':
                     valid = not ContextRules.is_false_positive_name(text_value)
-                # signature/address/photo/voter_id/passport/driving_license/gst/account_number:
-                # no strict local validator exists yet — trust Scout, validation agent double-checks later
 
                 if not valid:
-                    logger.info(f"⏭️ Rejected by ContextRules: {pii_type} = {text_value}")
+                    logger.info(f"Rejected by ContextRules: {pii_type} = {text_value}")
                     continue
 
-                bbox = self._locate_bbox(text_value, words, img_w, img_h)
-                if bbox is None:
-                    # No reliable local bbox found — do NOT guess a fallback box.
-                    # Drawing a black box in the wrong place is worse than missing one;
-                    # this gets logged so it can be surfaced for manual review instead.
-                    logger.warning(f"⚠️ No bbox located for Scout detection '{text_value}' "
-                                    f"({pii_type}) — skipping auto-redaction, flagging for review")
+                # Get per-line bboxes — one tight box per line instead of
+                # one giant envelope merging everything
+                bboxes = self._locate_bboxes(text_value, words, img_w, img_h)
+
+                if not bboxes:
+                    logger.warning(f"No bbox located for '{text_value}' ({pii_type}) — flagging for review")
                     vision_detections.append({
                         'pii_type': pii_type,
                         'text_value': text_value,
                         'bbox': None,
+                        'bboxes': [],
                         'confidence': d.get('confidence', 0.7),
                         'reasoning': d.get('reasoning', 'Llama 4 Scout visual detection'),
                         'needs_manual_review': True
@@ -120,13 +109,14 @@ class LLMVisionDetectionAgent:
                 vision_detections.append({
                     'pii_type': pii_type,
                     'text_value': text_value,
-                    'bbox': bbox,
+                    'bbox': bboxes[0],   # keep single bbox for backward compat
+                    'bboxes': bboxes,    # full per-line list used by redact_draw
                     'confidence': d.get('confidence', 0.85),
                     'reasoning': d.get('reasoning', 'Llama 4 Scout visual detection')
                 })
-                logger.info(f"✅ Scout {pii_type}: {text_value} -> bbox {bbox}")
+                logger.info(f"Scout {pii_type}: {text_value} -> {len(bboxes)} line bbox(es)")
 
-        logger.info(f"📊 Scout found {len(vision_detections)} PII items")
+        logger.info(f"Scout found {len(vision_detections)} PII items")
 
         return {
             'job_id': job_id,
@@ -139,14 +129,15 @@ class LLMVisionDetectionAgent:
         }
 
     @staticmethod
-    def _locate_bbox(text_value, words, img_w, img_h, padding=4):
-        merged = WordExtractor.find_phrase_bbox(text_value, words)
-        if merged is None:
-            return None
-        x0, y0, x1, y1 = merged
-        return [
-            max(0, x0 - padding),
-            max(0, y0 - padding),
-            min(img_w, x1 + padding),
-            min(img_h, y1 + padding)
-        ]
+    def _locate_bboxes(text_value, words, img_w, img_h, padding=4):
+        """Return list of per-line bboxes, clamped to image bounds."""
+        raw = WordExtractor.find_line_bboxes(text_value, words, padding=padding)
+        clamped = []
+        for b in raw:
+            clamped.append([
+                max(0, b[0]),
+                max(0, b[1]),
+                min(img_w, b[2]),
+                min(img_h, b[3])
+            ])
+        return clamped

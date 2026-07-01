@@ -1,4 +1,3 @@
-#validation.py
 import json
 import logging
 from agents.context_rules import ContextRules
@@ -64,14 +63,15 @@ class ValidationAgent:
                 'overall_risk': 'LOW'
             }
 
-        # --- Stage 1: cheap local pre-filter (format/regex validation, free, no API call) ---
+        # --- Stage 1: cheap local pre-filter ---
         prefiltered = []
-        seen = set()  # regex_detect and Scout both run independently and often catch the
-                       # same value — dedupe here so it doesn't get redacted/listed twice
+        seen = set()
         for d in all_detections:
             pii_type = d.get('pii_type', 'unknown')
             text_value = d.get('text_value', d.get('text', ''))
             bbox = d.get('bbox')
+            # carry bboxes list through — if not present, build from single bbox
+            bboxes = d.get('bboxes', [bbox] if bbox else [])
 
             dedupe_key = (pii_type, text_value.strip().lower())
             if dedupe_key in seen:
@@ -95,7 +95,7 @@ class ValidationAgent:
                 approved, note, confidence = False, f'False positive name: {text_value}', 0.2
 
             if not approved:
-                logger.info(f"⏭️ Stage1 rejected {pii_type}: {text_value} - {note}")
+                logger.info(f"Stage1 rejected {pii_type}: {text_value} - {note}")
                 continue
 
             seen.add(dedupe_key)
@@ -103,18 +103,19 @@ class ValidationAgent:
                 'pii_type': pii_type,
                 'text_value': text_value,
                 'bbox': bbox,
+                'bboxes': bboxes,
                 'confidence': confidence,
                 'note': note
             })
 
-        # --- Stage 2: Scout visual second opinion (catches context errors + missed PII) ---
+        # --- Stage 2: Scout visual second opinion ---
         candidates_payload = [
             {'index': i, 'pii_type': c['pii_type'], 'text_value': c['text_value']}
             for i, c in enumerate(prefiltered)
         ]
 
         final_redactions = []
-        words = None  # lazily loaded only if we need to locate bboxes for "missed" items
+        words = None
 
         review_result = call_groq_vision_json(
             SYSTEM_PROMPT,
@@ -127,15 +128,11 @@ class ValidationAgent:
 
             for i, c in enumerate(prefiltered):
                 decision = approvals.get(i)
-                # default to approved if Scout didn't return an explicit decision for this index,
-                # so a partial/odd model response doesn't silently drop valid redactions
                 approved = decision['approved'] if decision else True
                 note = decision.get('note', c['note']) if decision else c['note']
 
                 if c['bbox'] is None:
-                    # candidate had no local bbox (flagged in detection stage) — still keep it
-                    # visible to the audit/redaction step as needs_manual_review, never auto-skip
-                    approved = approved and False
+                    approved = False
                     note = note + ' | no bbox located, requires manual redaction'
 
                 if approved and c['bbox'] is not None:
@@ -143,16 +140,17 @@ class ValidationAgent:
                         'pii_type': c['pii_type'],
                         'text_value': c['text_value'],
                         'bbox': c['bbox'],
+                        'bboxes': c['bboxes'],
                         'approved': True,
                         'final_confidence': c['confidence'],
                         'flag_for_review': c['confidence'] < 0.7,
                         'validation_note': note
                     })
-                    logger.info(f"✅ Approved {c['pii_type']} at bbox: {c['bbox']}")
+                    logger.info(f"Approved {c['pii_type']} — {len(c['bboxes'])} line box(es)")
                 else:
-                    logger.info(f"⏭️ Rejected/needs-review {c['pii_type']}: {c['text_value']} - {note}")
+                    logger.info(f"Rejected {c['pii_type']}: {c['text_value']} - {note}")
 
-            # Missed items Scout found visually — locate bbox locally before adding
+            # Missed items Scout found visually — locate per-line bboxes locally
             missed = review_result.get('missed', [])
             if missed:
                 words, _, _ = WordExtractor.extract_words(enhanced_path)
@@ -161,26 +159,25 @@ class ValidationAgent:
                     pii_type = m.get('pii_type', 'unknown')
                     if not text_value:
                         continue
-                    merged = WordExtractor.find_phrase_bbox(text_value, words)
-                    if merged is None:
-                        logger.warning(f"⚠️ Missed item '{text_value}' found by validator but no bbox "
-                                        f"located — flagging for manual review instead of guessing")
+                    line_bboxes = WordExtractor.find_line_bboxes(text_value, words)
+                    if not line_bboxes:
+                        logger.warning(f"Missed item '{text_value}' — no bbox located, skipping")
                         continue
-                    x0, y0, x1, y1 = merged
-                    bbox = [max(0, x0 - 4), max(0, y0 - 4), min(img_w, x1 + 4), min(img_h, y1 + 4)]
+                    primary_bbox = line_bboxes[0]
                     final_redactions.append({
                         'pii_type': pii_type,
                         'text_value': text_value,
-                        'bbox': bbox,
+                        'bbox': primary_bbox,
+                        'bboxes': line_bboxes,
                         'approved': True,
                         'final_confidence': 0.75,
                         'flag_for_review': True,
-                        'validation_note': f'Caught by validation-stage Scout review (missed by detection): {text_value}'
+                        'validation_note': f'Caught by validation Scout review (missed by detection): {text_value}'
                     })
-                    logger.info(f"✅ Added missed-item redaction {pii_type} at bbox: {bbox}")
+                    logger.info(f"Added missed {pii_type} — {len(line_bboxes)} line box(es)")
         else:
-            # Scout review unavailable — fall back to stage-1 approvals only, all flagged for review
-            logger.warning("⚠️ Validation-stage Scout call failed — using local pre-filter results only")
+            # Scout unavailable — fall back to stage-1 approvals
+            logger.warning("Validation Scout call failed — using local pre-filter only")
             for c in prefiltered:
                 if c['bbox'] is None:
                     continue
@@ -188,18 +185,14 @@ class ValidationAgent:
                     'pii_type': c['pii_type'],
                     'text_value': c['text_value'],
                     'bbox': c['bbox'],
+                    'bboxes': c['bboxes'],
                     'approved': True,
                     'final_confidence': min(c['confidence'], 0.6),
                     'flag_for_review': True,
-                    'validation_note': c['note'] + ' | Scout validation unavailable, local-only approval'
+                    'validation_note': c['note'] + ' | Scout unavailable, local-only approval'
                 })
 
-        # --- Stage 3: dedicated LLM name classifier (real context understanding, not regex/spaCy) ---
-        # Scout's main detection pass and even its own visual review pass both still let resume
-        # noise like "AI Pothole Prediction" or "Projects RoadRupture" through as pii_type=name.
-        # This is a separate, narrowly-scoped, text-only call whose ONLY job is judging "is this
-        # string actually a human name" — a much easier, more reliable task for the model than
-        # detecting PII across a whole image at once.
+        # --- Stage 3: dedicated LLM name classifier ---
         final_redactions = self._filter_names_with_llm(final_redactions)
 
         # --- Risk scoring ---
@@ -214,7 +207,7 @@ class ValidationAgent:
         else:
             risk = 'LOW'
 
-        logger.info(f"✅ Validated {len(final_redactions)} items, Risk: {risk}")
+        logger.info(f"Validated {len(final_redactions)} items, Risk: {risk}")
 
         return {
             'job_id': job_id,
@@ -231,11 +224,10 @@ class ValidationAgent:
             return final_redactions
 
         payload = [{'index': i, 'text_value': r['text_value']} for i, r in name_items]
-
         result = call_groq_text_json(NAME_CHECK_SYSTEM_PROMPT, json.dumps(payload))
 
         if not result:
-            logger.warning("⚠️ LLM name-check call failed — keeping name candidates as-is, unreviewed")
+            logger.warning("LLM name-check failed — keeping name candidates as-is")
             return final_redactions
 
         verdicts = {
@@ -248,12 +240,10 @@ class ValidationAgent:
             if r.get('pii_type') != 'name':
                 filtered.append(r)
                 continue
-            # default to keeping it if the model omitted this index, so a partial/odd
-            # response doesn't silently drop a name that was actually correct
             is_name = verdicts.get(i, True)
             if is_name:
                 filtered.append(r)
             else:
-                logger.info(f"⏭️ LLM name-check rejected: {r['text_value']}")
+                logger.info(f"LLM name-check rejected: {r['text_value']}")
 
         return filtered
